@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>视频下载器 · YouTube / TikTok</title>
+<style>
+  :root {
+    --bg: #f4f6fb; --card: #fff; --text: #1f2430; --muted: #6b7280;
+    --primary: #4f46e5; --primary-h: #4338ca; --border: #e5e7eb;
+    --ok: #059669; --err: #dc2626; --warn: #b45309; --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+         background: var(--bg); color: var(--text); line-height: 1.6; }
+  .wrap { max-width: 820px; margin: 0 auto; padding: 32px 16px 60px; }
+  header { text-align: center; margin-bottom: 24px; }
+  header h1 { margin: 0 0 4px; font-size: 28px; }
+  header p { margin: 0; color: var(--muted); font-size: 14px; }
+  .card { background: var(--card); border-radius: var(--radius); box-shadow: 0 4px 20px rgba(17,24,39,.06); padding: 22px; margin-bottom: 18px; }
+  .row { display: flex; gap: 10px; }
+  input[type=text] { flex: 1; padding: 12px 14px; font-size: 15px; border: 1px solid var(--border); border-radius: 10px; outline: none; transition: border .15s; min-width: 0; }
+  input[type=text]:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(79,70,229,.12); }
+  button { padding: 12px 20px; font-size: 15px; border: 0; border-radius: 10px; cursor: pointer; background: var(--primary); color: #fff; white-space: nowrap; transition: background .15s, opacity .15s; }
+  button:hover:not(:disabled) { background: var(--primary-h); }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+  button.ghost { background: transparent; color: var(--primary); border: 1px solid var(--border); padding: 6px 12px; font-size: 13px; }
+  button.ghost:hover:not(:disabled) { background: #eef2ff; }
+  .notice { font-size: 13px; padding: 10px 12px; border-radius: 10px; margin-top: 12px; display: none; }
+  .notice.show { display: block; }
+  .notice.err { background: #fef2f2; color: var(--err); border: 1px solid #fecaca; }
+  .notice.warn { background: #fffbeb; color: var(--warn); border: 1px solid #fde68a; }
+  .notice.ok { background: #ecfdf5; color: var(--ok); border: 1px solid #a7f3d0; }
+  .notice details { margin-top: 6px; color: #7f1d1d; }
+  .notice details pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; margin: 6px 0 0; }
+  .info { display: none; gap: 18px; }
+  .info.show { display: flex; }
+  .thumb { width: 260px; flex-shrink: 0; aspect-ratio: 16/9; border-radius: 10px; background: #e5e7eb center/cover no-repeat; object-fit: cover; }
+  .meta { flex: 1; min-width: 0; }
+  .meta h2 { margin: 0 0 8px; font-size: 18px; word-break: break-word; }
+  .meta .kv { color: var(--muted); font-size: 14px; }
+  .meta .kv b { color: var(--text); font-weight: 500; }
+  select { width: 100%; padding: 10px 12px; font-size: 15px; border: 1px solid var(--border); border-radius: 10px; margin: 12px 0 10px; background: #fff; }
+  .progress { display: none; margin-top: 14px; }
+  .progress.show { display: block; }
+  .bar { height: 10px; background: #eef0f5; border-radius: 99px; overflow: hidden; }
+  .bar > div { height: 100%; width: 0; background: linear-gradient(90deg, #6366f1, #8b5cf6); transition: width .3s; }
+  .bar.indeterminate > div { width: 30% !important; animation: slide 1.2s infinite ease-in-out; }
+  @keyframes slide { 0% { margin-left: -30%; } 100% { margin-left: 100%; } }
+  .pstat { display: flex; justify-content: space-between; font-size: 13px; color: var(--muted); margin-top: 6px; gap: 10px; }
+  .files-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  .files-head h3 { margin: 0; font-size: 16px; }
+  ul.files { list-style: none; margin: 0; padding: 0; }
+  ul.files li { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-top: 1px solid var(--border); font-size: 14px; }
+  ul.files li:first-child { border-top: 0; }
+  ul.files .fname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  ul.files .fmeta { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  ul.files a { color: var(--primary); text-decoration: none; white-space: nowrap; }
+  ul.files a:hover { text-decoration: underline; }
+  .del { background: none; color: var(--muted); padding: 2px 6px; font-size: 13px; }
+  .del:hover:not(:disabled) { background: #fef2f2; color: var(--err); }
+  .empty { color: var(--muted); font-size: 14px; text-align: center; padding: 12px 0; }
+  footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 24px; }
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,.5); border-top-color: #fff; border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; margin-right: 6px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (max-width: 640px) { .info.show { flex-direction: column; } .thumb { width: 100%; } .row { flex-direction: column; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>🎬 视频下载器</h1>
+    <p>粘贴 YouTube 或 TikTok 视频链接，解析后选择清晰度下载到本地</p>
+  </header>
+
+  <div class="card">
+    <div class="row">
+      <input type="text" id="url" placeholder="https://www.youtube.com/watch?v=...  或  https://www.tiktok.com/@user/video/..." autocomplete="off">
+      <button id="parseBtn">解析</button>
+    </div>
+    <div class="notice warn" id="envNotice"></div>
+    <div class="notice err" id="parseErr"></div>
+  </div>
+
+  <div class="card" id="resultCard" style="display:none">
+    <div class="info" id="info">
+      <img class="thumb" id="thumb" alt="封面" referrerpolicy="no-referrer">
+      <div class="meta">
+        <h2 id="title"></h2>
+        <div class="kv">上传者：<b id="uploader">-</b></div>
+        <div class="kv">时长：<b id="duration">-</b></div>
+        <div class="kv">来源：<b id="extractor">-</b> <span id="maxres"></span></div>
+        <select id="quality"></select>
+        <button id="dlBtn">下载</button>
+      </div>
+    </div>
+    <div class="progress" id="progress">
+      <div class="bar" id="bar"><div></div></div>
+      <div class="pstat"><span id="pmsg">准备中…</span><span id="pdetail"></span></div>
+    </div>
+    <div class="notice" id="dlNotice"></div>
+  </div>
+
+  <div class="card">
+    <div class="files-head">
+      <h3>📁 已下载的文件</h3>
+      <button class="ghost" id="refreshBtn">刷新</button>
+    </div>
+    <ul class="files" id="files"><li class="empty">加载中…</li></ul>
+  </div>
+
+  <footer>
+    仅供个人学习使用 · 请只下载你拥有版权或已获授权的内容 · 网站经常变化，请定期运行 <code>pip install -U yt-dlp</code>
+  </footer>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let currentUrl = "";
+let pollTimer = null;
+
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+function showNotice(el, type, msg, detail) {
+  el.className = "notice show " + type;
+  el.innerHTML = esc(msg) + (detail ? `<details><summary>查看详细错误</summary><pre>${esc(detail)}</pre></details>` : "");
+}
+function hideNotice(el) { el.className = "notice"; el.innerHTML = ""; }
+
+function fmtDuration(sec) {
+  if (sec == null) return "-";
+  sec = Math.round(sec);
+  const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+  const pad = n => String(n).padStart(2, "0");
+  return h ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
+function isHttpUrl(s) {
+  try { const u = new URL(s); return u.protocol === "http:" || u.protocol === "https:"; } catch { return false; }
+}
+
+async function api(path, opts = {}) {
+  let res;
+  try {
+    res = await fetch(path, opts);
+  } catch (e) {
+    throw { error: "无法连接到本地服务，请确认程序仍在运行。", detail: String(e) };
+  }
+  let data = {};
+  try { data = await res.json(); } catch { data = { error: `服务器返回异常 (HTTP ${res.status})` }; }
+  if (!res.ok || data.error) throw data;
+  return data;
+}
+
+async function loadStatus() {
+  try {
+    const s = await api("/api/status");
+    const tips = [];
+    if (!s.ffmpeg) tips.push("未检测到 ffmpeg：将下载单文件格式（画质可能较低，无法转 MP3）。安装 ffmpeg 后重启程序即可获得最佳画质 MP4。");
+    if (tips.length) showNotice($("envNotice"), "warn", tips.join(" "));
+  } catch {}
+}
+
+async function parse() {
+  const url = $("url").value.trim();
+  hideNotice($("parseErr"));
+  if (!isHttpUrl(url)) { showNotice($("parseErr"), "err", "请输入以 http:// 或 https:// 开头的有效视频链接"); return; }
+  const btn = $("parseBtn");
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>解析中';
+  $("resultCard").style.display = "none";
+  try {
+    const d = await api("/api/parse", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
+    currentUrl = url;
+    $("title").textContent = d.title || "(无标题)";
+    $("uploader").textContent = d.uploader || "-";
+    $("duration").textContent = d.duration != null ? fmtDuration(d.duration) : (d.duration_string || "-");
+    $("extractor").textContent = d.extractor || "-";
+    $("maxres").textContent = d.max_resolution ? `· 最高 ${d.max_resolution}p` : "";
+    const th = $("thumb");
+    if (d.thumbnail) { th.src = d.thumbnail; th.style.display = ""; } else { th.removeAttribute("src"); }
+    const sel = $("quality"); sel.innerHTML = "";
+    for (const q of d.qualities) {
+      const o = document.createElement("option");
+      o.value = q.id; o.textContent = q.label; o.disabled = !!q.disabled;
+      sel.appendChild(o);
+    }
+    $("info").classList.add("show");
+    $("progress").classList.remove("show");
+    hideNotice($("dlNotice"));
+    $("dlBtn").disabled = false;
+    $("resultCard").style.display = "";
+  } catch (e) {
+    showNotice($("parseErr"), "err", e.error || "解析失败", e.detail);
+  } finally {
+    btn.disabled = false; btn.textContent = "解析";
+  }
+}
+
+function setProgress(pct, msg, detail) {
+  const bar = $("bar");
+  if (pct == null) { bar.classList.add("indeterminate"); }
+  else { bar.classList.remove("indeterminate"); bar.firstElementChild.style.width = pct + "%"; }
+  $("pmsg").textContent = msg || "";
+  $("pdetail").textContent = detail || "";
+}
+
+async function download() {
+  if (!currentUrl) return;
+  const quality = $("quality").value;
+  hideNotice($("dlNotice"));
+  $("dlBtn").disabled = true; $("parseBtn").disabled = true;
+  $("progress").classList.add("show");
+  setProgress(null, "正在启动…", "");
+  try {
+    const { task_id } = await api("/api/download", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: currentUrl, quality }) });
+    poll(task_id);
+  } catch (e) {
+    finishUI();
+    $("progress").classList.remove("show");
+    showNotice($("dlNotice"), "err", e.error || "下载失败", e.detail);
+  }
+}
+
+function finishUI() { $("dlBtn").disabled = false; $("parseBtn").disabled = false; }
+
+function poll(taskId) {
+  clearTimeout(pollTimer);
+  const tick = async () => {
+    let t;
+    try { t = await api("/api/progress/" + taskId); }
+    catch (e) { finishUI(); showNotice($("dlNotice"), "err", e.error || "获取进度失败", e.detail); return; }
+    if (t.status === "downloading") {
+      const parts = [];
+      if (t.downloaded) parts.push(t.total ? `${t.downloaded} / ${t.total}` : t.downloaded);
+      if (t.speed) parts.push(t.speed);
+      if (t.eta != null) parts.push(`剩余 ${fmtDuration(t.eta)}`);
+      setProgress(t.percent, `${t.message} ${t.percent != null ? t.percent.toFixed(1) + "%" : ""}`, parts.join(" · "));
+    } else if (t.status === "processing" || t.status === "starting" || t.status === "queued") {
+      setProgress(t.status === "processing" ? 100 : null, t.message, "");
+      if (t.status === "processing") $("bar").classList.add("indeterminate");
+    } else if (t.status === "finished") {
+      setProgress(100, "✅ 下载完成", t.size || "");
+      finishUI();
+      const href = "/files/" + encodeURIComponent(t.filename);
+      showNotice($("dlNotice"), "ok", `已保存：${t.filename}（浏览器将自动开始下载）`);
+      $("dlNotice").innerHTML += ` <a href="${href}">若未自动下载请点此</a>`;
+      triggerBrowserDownload(href);
+      loadFiles();
+      return;
+    } else if (t.status === "error") {
+      $("progress").classList.remove("show");
+      finishUI();
+      showNotice($("dlNotice"), "err", t.error || "下载失败", t.detail);
+      loadFiles();
+      return;
+    }
+    pollTimer = setTimeout(tick, 800);
+  };
+  tick();
+}
+
+function triggerBrowserDownload(href) {
+  const a = document.createElement("a");
+  a.href = href; a.download = "";
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
+async function loadFiles() {
+  const ul = $("files");
+  try {
+    const { files } = await api("/api/files");
+    if (!files.length) { ul.innerHTML = '<li class="empty">还没有下载过文件</li>'; return; }
+    ul.innerHTML = files.map(f => `
+      <li>
+        <span class="fname" title="${esc(f.name)}">${esc(f.name)}</span>
+        <span class="fmeta">${esc(f.size)} · ${esc(f.mtime)}</span>
+        <a href="/files/${encodeURIComponent(f.name)}">下载</a>
+        <button class="del" data-name="${esc(f.name)}" title="从 downloads 文件夹删除">删除</button>
+      </li>`).join("");
+  } catch (e) {
+    ul.innerHTML = `<li class="empty">无法加载文件列表：${esc(e.error || "")}</li>`;
+  }
+}
+
+$("files").addEventListener("click", async (ev) => {
+  const btn = ev.target.closest(".del");
+  if (!btn) return;
+  const name = btn.dataset.name;
+  if (!confirm(`确定删除「${name}」吗？`)) return;
+  try { await api("/api/files/" + encodeURIComponent(name), { method: "DELETE" }); } catch (e) { alert(e.error || "删除失败"); }
+  loadFiles();
+});
+
+$("parseBtn").addEventListener("click", parse);
+$("dlBtn").addEventListener("click", download);
+$("refreshBtn").addEventListener("click", loadFiles);
+$("url").addEventListener("keydown", e => { if (e.key === "Enter") parse(); });
+$("thumb").addEventListener("error", e => { e.target.removeAttribute("src"); });
+
+loadStatus();
+loadFiles();
+</script>
+</body>
+</html>

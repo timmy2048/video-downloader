@@ -1,0 +1,4 @@
+Flask>=3.0
+# yt-dlp 需要经常更新: pip install -U yt-dlp
+# [default] 包含 YouTube 所需的 yt-dlp-ejs 等; [curl-cffi] 用于 TikTok 等网站的浏览器伪装
+yt-dlp[default,curl-cffi]>=2026.8.19
