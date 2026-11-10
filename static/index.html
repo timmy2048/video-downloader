@@ -218,7 +218,7 @@ async function parse() {
     const note = $("sourceNote");
     if (d.source === "weixin") {
       note.hidden = false;
-      note.textContent = "画质由第三方解析服务决定，目前只有一个 MP4。该服务若宕机，页面会直接说明。";
+      note.textContent = "视频号目前只有一个 MP4，画质以微信返回的原片为准。";
     } else if (d.source === "douyin" && !cookiesConfigured) {
       note.hidden = false;
       note.textContent = "若随后提示 403 或需要 cookies，请按页面上方的说明配置 cookies.txt。";
