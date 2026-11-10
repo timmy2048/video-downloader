@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: MIT
 
 from .core import (
-    DEFAULT_PARSER_ENDPOINT,
     DownloadError,
     ExtractionError,
     ExtractionResult,
@@ -22,7 +21,6 @@ from .core import (
 )
 
 __all__ = [
-    "DEFAULT_PARSER_ENDPOINT",
     "DownloadError",
     "ExtractionError",
     "ExtractionResult",

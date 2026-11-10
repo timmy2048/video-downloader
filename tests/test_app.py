@@ -82,8 +82,9 @@ class AppRoutingTests(unittest.TestCase):
             })
         self.assertEqual(response.status_code, 502)
         body = response.get_json()
-        self.assertIn("sph.litao.workers.dev", body["error"])
-        self.assertIn("第三方解析服务", body["error"])
+        self.assertNotIn("sph.litao.workers.dev", body["error"])
+        self.assertNotIn("第三方", body["error"])
+        self.assertIn("微信视频号", body["error"])
         self.assertIn("Parser request failed", body["detail"])
 
     def test_article_link_is_not_sent_to_the_parser(self) -> None:

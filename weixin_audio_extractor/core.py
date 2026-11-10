@@ -21,19 +21,24 @@
 
 """微信视频号分享链接的可复用核心。
 
-给定 https://weixin.qq.com/sph/... ，向第三方解析服务
-https://sph.litao.workers.dev/api/fetch_video_profile 要资料，
+分享链接在本机直接交给微信自己的预览接口
+https://channels.weixin.qq.com/finder-preview/api/feed/get_feed_info ：
+weixin.qq.com/sph/<id> 和 finder-preview/pages/sph?id=<id> 用 shortUri，
+已经带 token 与 eid 的预览页用 generalToken + exportId。
 优先用 feedInfo.h264VideoInfo.videoUrl，否则 h265，再否则 feedInfo.videoUrl，
 下载 MP4，并可用本机 ffmpeg 抽出 MP3/M4A。
 
-这里不实现新的解析接口，也不解密视频。当前 yt-dlp 没有微信视频号提取器，
-所以仍走上述解析服务。音频转换使用系统 PATH 里的 ffmpeg，不另带一份 ffmpeg。
+公开短链的预览经常只有标题、作者和封面。若本机配置了自己的元宝 Cookie
+（环境变量 YUANBAO_COOKIE，或项目目录 yuanbao_cookie.txt），会再用它向
+yuanbao.tencent.com 换取预览 token，然后走同一个微信接口。这里不内置密钥，
+也不再调用 sph.litao.workers.dev。音频转换使用系统 PATH 里的 ffmpeg。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -43,8 +48,13 @@ from typing import Any, Callable
 from urllib import error, parse, request
 
 
-DEFAULT_PARSER_ENDPOINT = "https://sph.litao.workers.dev/api/fetch_video_profile"
+FEED_INFO_URL = "https://channels.weixin.qq.com/finder-preview/api/feed/get_feed_info"
+YUANBAO_PARSE_URL = "https://yuanbao.tencent.com/api/weixin/get_parse_result"
+CHANNELS_REFERER = "https://channels.weixin.qq.com/"
 DEFAULT_TIMEOUT_SECONDS = 30
+_SHORT_URI_RE = re.compile(r"^[A-Za-z0-9]+")
+_SPH_PATH_RE = re.compile(r"/sph/([A-Za-z0-9_-]+)")
+_HEADER_UNSAFE_RE = re.compile(r"[\x00-\x1f\x7f]")
 VIDEO_SUFFIX = ".mp4"
 AUDIO_SUFFIX = ".mp3"
 METADATA_SUFFIX = ".json"
@@ -101,6 +111,16 @@ class ExtractionResult:
 
 
 @dataclass(frozen=True)
+class ShareTarget:
+    """本机向微信预览接口查询时用的参数。"""
+
+    short_uri: str
+    export_id: str
+    token: str
+    exchange_url: str
+
+
+@dataclass(frozen=True)
 class MediaResult:
     share_url: str
     source_video_url: str
@@ -115,52 +135,67 @@ class MediaResult:
     height: int | None
 
 
+def parse_share_target(share_url: str) -> ShareTarget:
+    """从分享链接取出 shortUri，或预览页上的 exportId 与 token。"""
+    parsed_url = parse.urlparse(share_url.strip())
+    host = (parsed_url.hostname or "").lower().rstrip(".")
+    if parsed_url.scheme not in {"http", "https"} or not host:
+        raise WeixinAudioExtractorError(
+            "Share URL must be an absolute http(s) URL."
+        )
+    query = parse.parse_qs(parsed_url.query)
+    token = _first_query(query, "token")
+    export_id = _first_query(query, "eid") or _first_query(query, "exportId")
+    path = parsed_url.path or ""
+    path_match = _SPH_PATH_RE.search(path)
+    path_id = path_match.group(1) if path_match else ""
+    short_uri = ""
+    channels_host = host == "channels.weixin.qq.com" or host.endswith(".channels.weixin.qq.com")
+    if host == "weixin.qq.com" and path_id:
+        short_uri = _short_uri(path_id)
+    elif channels_host and ("/sph" in path or _first_query(query, "id")) and not export_id:
+        short_uri = _short_uri(_first_query(query, "id") or path_id)
+    elif channels_host and path_id and not export_id:
+        short_uri = _short_uri(path_id)
+    if not short_uri and not export_id:
+        raise WeixinAudioExtractorError("not a channels share link")
+    exchange_url = f"https://weixin.qq.com/sph/{short_uri}" if short_uri else share_url.strip()
+    return ShareTarget(
+        short_uri=short_uri,
+        export_id=export_id.strip(),
+        token=token.strip(),
+        exchange_url=exchange_url,
+    )
+
+
 def fetch_video_profile(
     share_url: str,
     *,
-    parser_endpoint: str = DEFAULT_PARSER_ENDPOINT,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
-    _validate_share_url(share_url)
-    payload = json.dumps({"url": share_url}).encode("utf-8")
-    parser_request = request.Request(
-        parser_endpoint,
-        data=payload,
-        headers={
-            "Accept": "application/json",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "Content-Type": "application/json",
-            "Origin": "https://weixin.qq.com",
-            "Referer": "https://weixin.qq.com/",
-            "User-Agent": _BROWSER_USER_AGENT,
-        },
-        method="POST",
-    )
+    """在本机解析分享链接，返回带 feedInfo 的资料。没有可播放地址时抛错。"""
+    target = parse_share_target(share_url)
+    profile = _request_feed_info(target, timeout=timeout)
+    if _profile_has_video(profile):
+        return profile
 
-    try:
-        with request.urlopen(
-            parser_request,
-            timeout=timeout,
-            context=_build_ssl_context(),
-        ) as response:
-            raw_body = response.read().decode("utf-8")
-    except error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace").strip()
-        raise ParserRequestError(
-            f"Parser request failed with HTTP {exc.code}: {body or exc.reason}"
-        ) from exc
-    except (error.URLError, OSError) as exc:
-        raise ParserRequestError(f"Parser request failed: {exc}") from exc
+    cookie = _load_yuanbao_cookie()
+    if cookie:
+        exchanged = _exchange_with_yuanbao(target.exchange_url, cookie, timeout=timeout)
+        profile = _request_feed_info(exchanged, timeout=timeout)
+        if _profile_has_video(profile):
+            return profile
 
-    try:
-        data = json.loads(raw_body)
-    except json.JSONDecodeError as exc:
-        raise ParserResponseError("Parser response was not valid JSON.") from exc
-
-    if not isinstance(data, dict):
-        raise ParserResponseError("Parser response was not a JSON object.")
-
-    return data
+    if _is_picture_post(profile):
+        raise ParserResponseError("这条分享是图集，不是视频。")
+    blocked = _feed_block_message(profile)
+    if blocked:
+        raise ParserResponseError(blocked)
+    title = summarize_profile(profile).get("title") or ""
+    detail = "Parser response did not contain an H.264 or H.265 video URL."
+    if title:
+        detail = f"{detail} title={title}"
+    raise ParserResponseError(detail)
 
 
 def select_video_url(profile: dict[str, Any]) -> str:
@@ -191,6 +226,7 @@ def summarize_profile(profile: dict[str, Any]) -> dict[str, Any]:
     h264 = feed.get("h264VideoInfo") if isinstance(feed.get("h264VideoInfo"), dict) else {}
     h265 = feed.get("h265VideoInfo") if isinstance(feed.get("h265VideoInfo"), dict) else {}
     contact = feed.get("contact") if isinstance(feed.get("contact"), dict) else {}
+    author = _extract_author_info(profile)
     title = _plain(
         feed.get("description")
         or feed.get("desc")
@@ -207,6 +243,7 @@ def summarize_profile(profile: dict[str, Any]) -> dict[str, Any]:
         feed.get("nickname")
         or feed.get("author")
         or contact.get("nickname")
+        or author.get("nickname")
     )
     duration = _positive_int(h264.get("duration") or h265.get("duration") or feed.get("duration"))
     if duration is None:
@@ -262,29 +299,42 @@ def build_media_filename(share_url: str, profile: dict[str, Any], quality: str) 
 
 
 def user_message(exc: BaseException) -> str:
-    """把核心异常翻成页面和命令行用的中文说明，并点明第三方解析服务。"""
+    """把核心异常翻成页面和命令行用的中文说明。"""
     if isinstance(exc, ParserRequestError):
-        return (
-            "微信视频号的第三方解析服务暂时无法访问"
-            f"（{DEFAULT_PARSER_ENDPOINT}）。"
-            "这个地址不属于本程序；服务宕机、超时或拒绝请求时，视频号链接会失败。"
-            "请稍后重试。如果只有视频号失败、其他网站正常，就是该解析服务的问题。"
-        )
+        text = str(exc)
+        if "YUANBAO_COOKIE" in text:
+            return "本机的元宝 Cookie 格式不正确。请粘贴一整行 Cookie，不要换行，也不要发给别人。"
+        if "401" in text or "403" in text:
+            return (
+                "本机配置的元宝登录已被拒绝。"
+                "请重新登录 yuanbao.tencent.com，更新环境变量 YUANBAO_COOKIE"
+                "或项目目录里的 yuanbao_cookie.txt 后再试。"
+                "Cookie 等同登录凭证，不要发给别人，也不要做成公开服务。"
+            )
+        return "连接微信视频号失败（网络超时或请求被拒绝）。请检查本机网络后重试。"
     if isinstance(exc, ParserResponseError):
         text = str(exc)
+        if "图集" in text:
+            return "这条微信视频号分享是图集，不是视频。当前只能下载视频。"
         if "feedInfo" in text or "H.264" in text or "H.265" in text:
+            recognized = ""
+            marker = "title="
+            if marker in text:
+                recognized = text.split(marker, 1)[1].strip()
+            lead = f"已识别「{recognized}」，但" if recognized else ""
             return (
-                "第三方解析服务有响应，但没有返回可用的视频地址"
-                "（需要 feedInfo.h264VideoInfo.videoUrl，否则用 h265，再否则 feedInfo.videoUrl）。"
-                "链接可能已失效，或解析服务改了返回格式。"
-                f"解析服务：{DEFAULT_PARSER_ENDPOINT}"
+                f"{lead}微信视频号的公开预览没有返回可播放的视频地址。"
+                "链接可能已失效，或这条内容需要在微信里登录后才能观看。"
+                "带 token 和 eid 的 channels.weixin.qq.com 预览链接请整段粘贴。"
+                "普通 weixin.qq.com/sph/ 短链也可以在本机配置你自己的元宝 Cookie"
+                "（环境变量 YUANBAO_COOKIE，或项目目录的 yuanbao_cookie.txt）后再解析。"
+                "不要把 Cookie 发给别人。"
             )
-        return (
-            "第三方解析服务返回了无法识别的内容。请确认这是 weixin.qq.com/sph/ 开头的视频号分享链接。"
-            f"解析服务：{DEFAULT_PARSER_ENDPOINT}"
-        )
+        if text and "Parser response" not in text:
+            return f"微信视频号暂时无法播放这条内容。{text}"
+        return "微信视频号返回了无法识别的内容。请确认这是 weixin.qq.com/sph/ 开头的视频号分享链接。"
     if isinstance(exc, DownloadError):
-        return "已从第三方解析服务拿到视频地址，但下载 MP4 失败。链接可能过期或网络中断，请重新解析后再试。"
+        return "已经拿到视频地址，但下载 MP4 失败。地址可能已过期，或网络中断。请重新解析后再试。"
     if isinstance(exc, ExtractionError):
         low = str(exc).lower()
         if "not found" in low or "ffmpeg" in low:
@@ -302,7 +352,6 @@ def extract_weixin_audio(
     output_dir: Path,
     *,
     keep_video: bool = False,
-    parser_endpoint: str = DEFAULT_PARSER_ENDPOINT,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> ExtractionResult:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -311,15 +360,11 @@ def extract_weixin_audio(
     metadata_path = output_dir / f"{stem}{METADATA_SUFFIX}"
     video_path = output_dir / f"{stem}{VIDEO_SUFFIX}"
 
-    profile = fetch_video_profile(
-        share_url,
-        parser_endpoint=parser_endpoint,
-        timeout=timeout,
-    )
+    profile = fetch_video_profile(share_url, timeout=timeout)
     source_video_url = select_video_url(profile)
 
     _write_metadata(profile, metadata_path)
-    _download_file(source_video_url, video_path, timeout=timeout)
+    _download_file(source_video_url, video_path, timeout=timeout, referer=CHANNELS_REFERER)
 
     try:
         _extract_audio_with_ffmpeg(video_path, audio_path)
@@ -342,7 +387,6 @@ def download_media(
     *,
     quality: str = "best",
     keep_video: bool = False,
-    parser_endpoint: str = DEFAULT_PARSER_ENDPOINT,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     on_progress: ProgressCallback | None = None,
     on_stage: StageCallback | None = None,
@@ -353,11 +397,7 @@ def download_media(
     output_dir.mkdir(parents=True, exist_ok=True)
     if on_stage:
         on_stage("parsing")
-    profile = fetch_video_profile(
-        share_url,
-        parser_endpoint=parser_endpoint,
-        timeout=timeout,
-    )
+    profile = fetch_video_profile(share_url, timeout=timeout)
     source_video_url = select_video_url(profile)
     summary = summarize_profile(profile)
     stem = build_output_stem(share_url)
@@ -374,7 +414,7 @@ def download_media(
             partial,
             timeout=timeout,
             progress=on_progress,
-            referer=share_url,
+            referer=CHANNELS_REFERER,
         )
         partial.replace(video_final)
     except Exception:
@@ -475,12 +515,209 @@ def _extract_feed_info(profile: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def _validate_share_url(share_url: str) -> None:
-    parsed_url = parse.urlparse(share_url)
-    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
-        raise WeixinAudioExtractorError(
-            "Share URL must be an absolute http(s) URL."
+def _extract_author_info(profile: dict[str, Any]) -> dict[str, Any]:
+    containers: list[Any] = [profile]
+    data = profile.get("data")
+    if isinstance(data, dict):
+        containers.append(data)
+    for container in containers:
+        author = container.get("authorInfo") if isinstance(container, dict) else None
+        if isinstance(author, dict):
+            return author
+    return {}
+
+
+def _profile_has_video(profile: dict[str, Any]) -> bool:
+    try:
+        select_video_url(profile)
+    except ParserResponseError:
+        return False
+    return True
+
+
+def _is_picture_post(profile: dict[str, Any]) -> bool:
+    feed = _extract_feed_info(profile) or {}
+    pictures = feed.get("picInfo")
+    if not isinstance(pictures, list) or not pictures:
+        return False
+    return not _profile_has_video(profile)
+
+
+def _feed_block_message(profile: dict[str, Any]) -> str | None:
+    data = profile.get("data") if isinstance(profile.get("data"), dict) else {}
+    detail = data.get("errMsg") if isinstance(data, dict) else None
+    if isinstance(detail, dict):
+        kind = detail.get("type")
+        title = _plain(detail.get("title"))
+        content = _plain(detail.get("content"))
+        blocked = kind not in (None, 0, "0") and (title or content)
+        if blocked:
+            return "：".join(part for part in (title, content) if part)
+    err_code = profile.get("errCode")
+    if isinstance(err_code, int) and err_code != 0:
+        return _plain(profile.get("errMsg")) or f"errCode {err_code}"
+    error_body = profile.get("error")
+    if isinstance(error_body, dict):
+        return _plain(error_body.get("message")) or "微信视频号预览接口拒绝了这次请求。"
+    return None
+
+
+def _first_query(query: dict[str, list[str]], key: str) -> str:
+    values = query.get(key) or []
+    if not values or not isinstance(values[0], str):
+        return ""
+    return values[0].strip()
+
+
+def _short_uri(raw: str) -> str:
+    match = _SHORT_URI_RE.match(raw.strip())
+    return match.group(0) if match else ""
+
+
+def _load_yuanbao_cookie() -> str:
+    """读取本机自愿提供的元宝 Cookie。没有就返回空字符串，绝不内置密钥。"""
+    env_value = os.environ.get("YUANBAO_COOKIE", "").strip()
+    text = env_value
+    if not text:
+        file_env = os.environ.get("YUANBAO_COOKIE_FILE", "").strip()
+        candidates = []
+        if file_env:
+            candidates.append(Path(file_env).expanduser())
+        root = Path(__file__).resolve().parents[1]
+        candidates.append(root / "yuanbao_cookie.txt")
+        candidates.append(Path.cwd() / "yuanbao_cookie.txt")
+        seen: set[Path] = set()
+        for path in candidates:
+            resolved = path
+            try:
+                resolved = path.resolve()
+            except OSError:
+                continue
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            try:
+                if resolved.is_file():
+                    text = resolved.read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+            if text:
+                break
+    if not text:
+        return ""
+    if _HEADER_UNSAFE_RE.search(text):
+        raise ParserRequestError("YUANBAO_COOKIE is not a single header value.")
+    return text
+
+
+def _request_feed_info(target: ShareTarget, *, timeout: int) -> dict[str, Any]:
+    body: dict[str, Any] = {"baseReq": {"generalToken": target.token}}
+    if target.export_id and not target.short_uri:
+        body["exportId"] = target.export_id
+    elif target.short_uri:
+        body["shortUri"] = target.short_uri
+    else:
+        body["exportId"] = target.export_id
+    referer = CHANNELS_REFERER
+    if target.export_id and target.token:
+        referer = (
+            "https://channels.weixin.qq.com/finder-preview/pages/feed"
+            f"?token={parse.quote(target.token, safe='')}"
+            f"&eid={parse.quote(target.export_id, safe='')}"
         )
+    elif target.short_uri:
+        referer = (
+            "https://channels.weixin.qq.com/finder-preview/pages/sph"
+            f"?id={parse.quote(target.short_uri, safe='')}"
+        )
+    return _post_json(
+        FEED_INFO_URL,
+        body,
+        timeout=timeout,
+        origin="https://channels.weixin.qq.com",
+        referer=referer,
+    )
+
+
+def _exchange_with_yuanbao(share_url: str, cookie: str, *, timeout: int) -> ShareTarget:
+    payload = _post_json(
+        YUANBAO_PARSE_URL,
+        {"type": "video_channel_url", "url": share_url, "scene": 1},
+        timeout=timeout,
+        origin="https://yuanbao.tencent.com",
+        referer="https://yuanbao.tencent.com/",
+        extra_headers={"X-Source": "web", "Cookie": cookie},
+    )
+    inner = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    playable = inner.get("playable_url") if isinstance(inner.get("playable_url"), str) else ""
+    token = ""
+    export_id = ""
+    if playable:
+        parsed = parse.urlparse(playable)
+        query = parse.parse_qs(parsed.query)
+        token = _first_query(query, "token")
+        export_id = _first_query(query, "eid") or _first_query(query, "exportId")
+    if not export_id and isinstance(inner.get("wx_export_id"), str):
+        export_id = inner["wx_export_id"].strip()
+    if not token or not export_id:
+        raise ParserResponseError(
+            "Parser response did not contain an H.264 or H.265 video URL."
+        )
+    return ShareTarget(
+        short_uri="",
+        export_id=export_id,
+        token=token,
+        exchange_url=share_url,
+    )
+
+
+def _post_json(
+    url: str,
+    payload: dict[str, Any],
+    *,
+    timeout: int,
+    origin: str,
+    referer: str,
+    extra_headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Content-Type": "application/json",
+        "Origin": origin,
+        "Referer": referer,
+        "User-Agent": _BROWSER_USER_AGENT,
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+    outbound = request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with request.urlopen(
+            outbound,
+            timeout=timeout,
+            context=_build_ssl_context(),
+        ) as response:
+            raw_body = response.read().decode("utf-8")
+    except error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace").strip()
+        raise ParserRequestError(
+            f"Parser request failed with HTTP {exc.code}: {body or exc.reason}"
+        ) from exc
+    except (error.URLError, OSError) as exc:
+        raise ParserRequestError(f"Parser request failed: {exc}") from exc
+
+    try:
+        data = json.loads(raw_body)
+    except json.JSONDecodeError as exc:
+        raise ParserResponseError("Parser response was not valid JSON.") from exc
+    if not isinstance(data, dict):
+        raise ParserResponseError("Parser response was not a JSON object.")
+    return data
 
 
 def _build_ssl_context() -> ssl.SSLContext:

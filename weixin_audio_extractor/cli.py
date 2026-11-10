@@ -14,7 +14,7 @@ from .core import WeixinAudioExtractorError, extract_weixin_audio, user_message
 
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="从微信视频号分享链接提取 MP3（依赖第三方解析服务）。"
+        description="从微信视频号分享链接提取 MP3（本机请求微信预览接口）。"
     )
     parser.add_argument("--url", required=True, help="微信视频号分享链接，例如 https://weixin.qq.com/sph/...")
     parser.add_argument(

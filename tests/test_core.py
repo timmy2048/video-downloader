@@ -1,4 +1,5 @@
 import io
+import json
 import sys
 from pathlib import Path
 import tempfile
@@ -12,7 +13,6 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from weixin_audio_extractor.core import (  # noqa: E402
-    DEFAULT_PARSER_ENDPOINT,
     DownloadError,
     ExtractionError,
     ParserRequestError,
@@ -22,6 +22,7 @@ from weixin_audio_extractor.core import (  # noqa: E402
     download_media,
     extract_weixin_audio,
     fetch_video_profile,
+    parse_share_target,
     select_video_url,
     summarize_profile,
     user_message,
@@ -117,6 +118,24 @@ class SummarizeProfileTests(unittest.TestCase):
         self.assertEqual(summary["width"], 720)
         self.assertEqual(summary["height"], 1280)
 
+    def test_summarize_profile_reads_preview_author_info(self) -> None:
+        summary = summarize_profile({
+            "errCode": 0,
+            "data": {
+                "authorInfo": {"nickname": "牛小婶婶", "headImgUrl": "https://wx.qlogo.cn/a"},
+                "feedInfo": {
+                    "description": "大家结果都一样",
+                    "coverUrl": "https://finder.video.qq.com/cover.jpg",
+                    "h264VideoInfo": {"width": 1080, "height": 1920, "duration": 8},
+                },
+            },
+        })
+        self.assertEqual(summary["title"], "大家结果都一样")
+        self.assertEqual(summary["uploader"], "牛小婶婶")
+        self.assertEqual(summary["thumbnail"], "https://finder.video.qq.com/cover.jpg")
+        self.assertEqual(summary["width"], 1080)
+        self.assertEqual(summary["height"], 1920)
+
     def test_summarize_profile_converts_duration_ms(self) -> None:
         summary = summarize_profile({
             "feedInfo": {"h264VideoInfo": {"durationMs": 12500}},
@@ -172,18 +191,20 @@ class FailureHandlingTests(unittest.TestCase):
             with self.assertRaisesRegex(Exception, "HTTP 503"):
                 fetch_video_profile("https://weixin.qq.com/sph/AWU0OMKvVm")
 
-    def test_parser_outage_message_names_the_third_party_endpoint(self) -> None:
+    def test_network_failure_message_does_not_blame_a_removed_parser(self) -> None:
         message = user_message(ParserRequestError("Parser request failed: timed out"))
-        self.assertIn(DEFAULT_PARSER_ENDPOINT, message)
-        self.assertIn("第三方解析服务", message)
-        self.assertIn("宕机", message)
+        self.assertNotIn("litao", message)
+        self.assertNotIn("第三方", message)
+        self.assertIn("微信视频号", message)
+        self.assertIn("网络", message)
 
     def test_unusable_payload_message_is_chinese(self) -> None:
         message = user_message(ParserResponseError(
             "Parser response did not contain an H.264 or H.265 video URL."
         ))
-        self.assertIn("没有返回可用的视频地址", message)
-        self.assertIn(DEFAULT_PARSER_ENDPOINT, message)
+        self.assertIn("没有返回可播放的视频地址", message)
+        self.assertNotIn("litao", message)
+        self.assertNotIn("第三方", message)
 
     def test_extract_weixin_audio_rejects_invalid_share_url(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -332,6 +353,209 @@ class DownloadMediaTests(unittest.TestCase):
         with mock.patch("weixin_audio_extractor.core.shutil.which", return_value=None):
             with self.assertRaises(ExtractionError):
                 _extract_audio_with_ffmpeg(Path("in.mp4"), Path("out.mp3"))
+
+
+class _JsonResponse:
+    def __init__(self, payload: dict) -> None:
+        self._raw = json.dumps(payload).encode("utf-8")
+
+    def read(self) -> bytes:
+        return self._raw
+
+    def __enter__(self) -> "_JsonResponse":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+
+def _recorded_urlopen(responses: list[dict]):
+    calls: list[dict] = []
+
+    def urlopen(req, timeout=None, context=None):
+        del timeout, context
+        body = json.loads(req.data.decode("utf-8"))
+        calls.append({
+            "url": req.full_url,
+            "headers": {key.lower(): value for key, value in req.header_items()},
+            "body": body,
+        })
+        if not responses:
+            raise AssertionError("unexpected request")
+        return _JsonResponse(responses.pop(0))
+
+    return urlopen, calls
+
+
+LIVE_SHAPED_PROFILE = {
+    "errCode": 0,
+    "errMsg": "",
+    "data": {
+        "authorInfo": {"nickname": "牛小婶婶", "headImgUrl": "https://wx.qlogo.cn/a"},
+        "feedInfo": {
+            "description": "大家结果都一样，不要难过了",
+            "coverUrl": "https://finder.video.qq.com/cover.jpg",
+            "picInfo": [],
+            "h264VideoInfo": {
+                "videoUrl": "https://finder.video.qq.com/251/20302/stodownload?encfilekey=abc&token=def",
+                "width": 1080,
+                "height": 1920,
+                "duration": 12,
+            },
+            "h265VideoInfo": {
+                "videoUrl": "https://finder.video.qq.com/h265.mp4",
+            },
+        },
+        "errMsg": {"type": 0},
+        "sceneInfo": {"dynamicExportId": "export/example"},
+    },
+}
+
+
+class LocalPreviewResolveTests(unittest.TestCase):
+    def test_share_targets(self) -> None:
+        sph = parse_share_target("https://weixin.qq.com/sph/AYLHoWrWfu")
+        self.assertEqual(sph.short_uri, "AYLHoWrWfu")
+        self.assertEqual(sph.export_id, "")
+        preview = parse_share_target(
+            "https://channels.weixin.qq.com/finder-preview/pages/sph?id=AoPX5bEBDd"
+        )
+        self.assertEqual(preview.short_uri, "AoPX5bEBDd")
+        feed = parse_share_target(
+            "https://channels.weixin.qq.com/finder-preview/pages/feed"
+            "?token=TOK&eid=export%2Fabc"
+        )
+        self.assertEqual(feed.token, "TOK")
+        self.assertEqual(feed.export_id, "export/abc")
+        self.assertEqual(feed.short_uri, "")
+
+    def test_sph_link_posts_short_uri_to_weixin(self) -> None:
+        urlopen, calls = _recorded_urlopen([LIVE_SHAPED_PROFILE])
+        with mock.patch("weixin_audio_extractor.core.request.urlopen", urlopen), \
+                mock.patch("weixin_audio_extractor.core._load_yuanbao_cookie", return_value=""):
+            profile = fetch_video_profile("https://weixin.qq.com/sph/AYLHoWrWfu")
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0]["url"].startswith(
+            "https://channels.weixin.qq.com/finder-preview/api/feed/get_feed_info"
+        ))
+        self.assertNotIn("litao", calls[0]["url"])
+        self.assertEqual(calls[0]["body"], {
+            "baseReq": {"generalToken": ""},
+            "shortUri": "AYLHoWrWfu",
+        })
+        self.assertNotIn("cookie", calls[0]["headers"])
+        self.assertEqual(
+            select_video_url(profile),
+            "https://finder.video.qq.com/251/20302/stodownload?encfilekey=abc&token=def",
+        )
+        self.assertEqual(summarize_profile(profile)["uploader"], "牛小婶婶")
+
+    def test_feed_link_posts_token_and_export_id(self) -> None:
+        urlopen, calls = _recorded_urlopen([LIVE_SHAPED_PROFILE])
+        with mock.patch("weixin_audio_extractor.core.request.urlopen", urlopen):
+            fetch_video_profile(
+                "https://channels.weixin.qq.com/finder-preview/pages/feed"
+                "?token=TOK&eid=export%2Fabc"
+            )
+        self.assertEqual(calls[0]["body"]["baseReq"]["generalToken"], "TOK")
+        self.assertEqual(calls[0]["body"]["exportId"], "export/abc")
+        self.assertNotIn("shortUri", calls[0]["body"])
+
+    def test_preview_without_video_stays_local_when_no_cookie(self) -> None:
+        preview_only = {
+            "errCode": 0,
+            "data": {
+                "authorInfo": {"nickname": "牛小婶婶"},
+                "feedInfo": {
+                    "description": "大家结果都一样，不要难过了",
+                    "coverUrl": "https://finder.video.qq.com/cover.jpg",
+                    "picInfo": [],
+                },
+                "errMsg": {"type": 0},
+            },
+        }
+        urlopen, calls = _recorded_urlopen([preview_only])
+        with mock.patch("weixin_audio_extractor.core.request.urlopen", urlopen), \
+                mock.patch("weixin_audio_extractor.core._load_yuanbao_cookie", return_value=""):
+            with self.assertRaises(ParserResponseError) as caught:
+                fetch_video_profile("https://weixin.qq.com/sph/AYLHoWrWfu")
+        self.assertEqual(len(calls), 1)
+        message = user_message(caught.exception)
+        self.assertIn("大家结果都一样，不要难过了", message)
+        self.assertIn("没有返回可播放的视频地址", message)
+        self.assertNotIn("litao", message)
+
+    def test_owner_cookie_exchanges_a_token_then_asks_weixin_again(self) -> None:
+        preview_only = {
+            "errCode": 0,
+            "data": {
+                "feedInfo": {"description": "只有封面", "picInfo": []},
+                "errMsg": {"type": 0},
+            },
+        }
+        yuanbao = {
+            "code": 0,
+            "data": {
+                "wx_export_id": "export/abc",
+                "playable_url": (
+                    "https://channels.weixin.qq.com/finder-preview/pages/feed"
+                    "?token=TOK&eid=export%2Fabc"
+                ),
+            },
+        }
+        urlopen, calls = _recorded_urlopen([preview_only, yuanbao, LIVE_SHAPED_PROFILE])
+        with mock.patch(
+            "weixin_audio_extractor.core._load_yuanbao_cookie",
+            return_value="hy_token=local-secret",
+        ), mock.patch("weixin_audio_extractor.core.request.urlopen", urlopen):
+            profile = fetch_video_profile("https://weixin.qq.com/sph/AYLHoWrWfu")
+        self.assertEqual(
+            select_video_url(profile),
+            "https://finder.video.qq.com/251/20302/stodownload?encfilekey=abc&token=def",
+        )
+        self.assertIn("channels.weixin.qq.com", calls[0]["url"])
+        self.assertEqual(calls[1]["url"], "https://yuanbao.tencent.com/api/weixin/get_parse_result")
+        self.assertEqual(calls[1]["headers"].get("cookie"), "hy_token=local-secret")
+        self.assertNotIn("cookie", calls[0]["headers"])
+        self.assertNotIn("cookie", calls[2]["headers"])
+        self.assertEqual(calls[2]["body"]["exportId"], "export/abc")
+        self.assertEqual(calls[2]["body"]["baseReq"]["generalToken"], "TOK")
+
+    def test_picture_post_is_rejected_in_chinese(self) -> None:
+        pictures = {
+            "errCode": 0,
+            "data": {
+                "feedInfo": {
+                    "picInfo": [{"url": "https://cdn.example.com/1.jpg"}],
+                    "description": "图集",
+                },
+                "errMsg": {"type": 0},
+            },
+        }
+        urlopen, _calls = _recorded_urlopen([pictures])
+        with mock.patch("weixin_audio_extractor.core.request.urlopen", urlopen), \
+                mock.patch("weixin_audio_extractor.core._load_yuanbao_cookie", return_value=""):
+            with self.assertRaises(ParserResponseError) as caught:
+                fetch_video_profile("https://weixin.qq.com/sph/AYLHoWrWfu")
+        self.assertIn("图集", user_message(caught.exception))
+
+    def test_blocked_preview_uses_weixin_title(self) -> None:
+        blocked = {
+            "errCode": 0,
+            "data": {
+                "errMsg": {"type": 2, "title": "此内容暂时无法播放"},
+                "sceneInfo": {},
+            },
+        }
+        urlopen, _calls = _recorded_urlopen([blocked])
+        with mock.patch("weixin_audio_extractor.core.request.urlopen", urlopen), \
+                mock.patch("weixin_audio_extractor.core._load_yuanbao_cookie", return_value=""):
+            with self.assertRaises(ParserResponseError) as caught:
+                fetch_video_profile(
+                    "https://channels.weixin.qq.com/finder-preview/pages/feed?eid=export%2Fabc"
+                )
+        self.assertIn("此内容暂时无法播放", user_message(caught.exception))
+        self.assertNotIn("litao", user_message(caught.exception))
 
 
 if __name__ == "__main__":

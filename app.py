@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 本地视频下载器 (YouTube / TikTok / 抖音 / 微信视频号)
-后端: Flask + yt-dlp；微信视频号走第三方解析服务（见 weixin_audio_extractor）
+后端: Flask + yt-dlp；微信视频号在本机请求微信预览接口（见 weixin_audio_extractor）
 默认只监听 127.0.0.1:5000, 仅供本机使用。不要改成 0.0.0.0。
 """
 import os
@@ -227,7 +227,7 @@ WEIXIN_QUALITIES = ("best", "mp3", "m4a")
 
 
 def build_weixin_quality_options(ff=None):
-    """视频号只有解析服务返回的单个 MP4, 清晰度分档用不上; 音频沿用 MP3/M4A。"""
+    """视频号目前只有一个 MP4, 清晰度分档用不上; 音频沿用 MP3/M4A。"""
     if ff is None:
         ff = has_ffmpeg()
     return [
@@ -284,7 +284,7 @@ def update_task(task_id, **kw):
 def run_weixin_download(task_id, url, quality, keep_video):
     def on_stage(stage):
         messages = {
-            "parsing": "正在请求微信视频号解析服务…",
+            "parsing": "正在解析微信视频号…",
             "downloading": "正在下载…",
             "extracting": "正在提取音频…",
         }
@@ -440,7 +440,7 @@ def api_status():
 
 def parse_weixin(url):
     # yt-dlp 能处理抖音 (DouyinIE, 短链由 generic 跟着重定向), 但没有微信视频号提取器。
-    # 视频号继续用 weixin_audio_extractor 里的第三方解析服务。
+    # 视频号在本机请求微信自己的预览接口。
     try:
         profile = fetch_video_profile(url)
         select_video_url(profile)
@@ -527,7 +527,7 @@ def api_download():
     if quality not in allowed:
         if source == "weixin" and quality in YTDLP_QUALITIES:
             return jsonify({
-                "error": "微信视频号由第三方解析服务提供单个 MP4, 没有 1080p/720p/480p 分档。请选择视频 MP4 或音频。",
+                "error": "微信视频号目前只有一个 MP4, 没有 1080p/720p/480p 分档。请选择视频 MP4 或音频。",
             }), 400
         return jsonify({"error": "未知的清晰度选项"}), 400
     if quality == "mp3" and not has_ffmpeg():
