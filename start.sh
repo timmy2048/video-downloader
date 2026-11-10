@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # 视频下载器 一键启动 (macOS / Linux)
+# 支持 YouTube / TikTok / 抖音 / 微信视频号，只监听 127.0.0.1
 set -e
 cd "$(dirname "$0")"
 
@@ -24,7 +25,7 @@ venv/bin/python -m pip install --disable-pip-version-check -q --upgrade pip
 venv/bin/python -m pip install --disable-pip-version-check -q -U -r requirements.txt
 
 if ! command -v ffmpeg >/dev/null 2>&1; then
-  echo "提示: 未检测到 ffmpeg, 将使用单文件格式 (画质可能较低, 无法转 MP3)。"
+  echo "提示: 未检测到 ffmpeg。YouTube 高画质合并、MP3，以及微信视频号提取音频都需要它。"
   echo "      macOS: brew install ffmpeg    Ubuntu/Debian: sudo apt install ffmpeg"
 fi
 
