@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>视频下载器 · YouTube / TikTok</title>
+<title>视频下载器 · YouTube / TikTok / 抖音 / 微信</title>
 <style>
   :root {
     --bg: #f4f6fb; --card: #fff; --text: #1f2430; --muted: #6b7280;
@@ -19,9 +19,12 @@
   header p { margin: 0; color: var(--muted); font-size: 14px; }
   .card { background: var(--card); border-radius: var(--radius); box-shadow: 0 4px 20px rgba(17,24,39,.06); padding: 22px; margin-bottom: 18px; }
   .row { display: flex; gap: 10px; }
-  input[type=text] { flex: 1; padding: 12px 14px; font-size: 15px; border: 1px solid var(--border); border-radius: 10px; outline: none; transition: border .15s; min-width: 0; }
+  label[for=url] { display: block; font-size: 0.875rem; font-weight: 600; margin-bottom: 8px; }
+  .hint { color: var(--muted); font-size: 0.8125rem; margin: 8px 0 0; }
+  input[type=text] { flex: 1; padding: 12px 14px; font: inherit; font-size: 1rem; border: 1px solid var(--border); border-radius: 10px; outline: none; transition: border .15s; min-width: 0; min-height: 48px; }
   input[type=text]:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(79,70,229,.12); }
-  button { padding: 12px 20px; font-size: 15px; border: 0; border-radius: 10px; cursor: pointer; background: var(--primary); color: #fff; white-space: nowrap; transition: background .15s, opacity .15s; }
+  button { padding: 12px 20px; font: inherit; font-size: 1rem; border: 0; border-radius: 10px; cursor: pointer; background: var(--primary); color: #fff; white-space: nowrap; transition: background .15s, opacity .15s; }
+  #parseBtn, #dlBtn { min-height: 48px; }
   button:hover:not(:disabled) { background: var(--primary-h); }
   button:disabled { opacity: .55; cursor: not-allowed; }
   button.ghost { background: transparent; color: var(--primary); border: 1px solid var(--border); padding: 6px 12px; font-size: 13px; }
@@ -40,7 +43,12 @@
   .meta h2 { margin: 0 0 8px; font-size: 18px; word-break: break-word; }
   .meta .kv { color: var(--muted); font-size: 14px; }
   .meta .kv b { color: var(--text); font-weight: 500; }
-  select { width: 100%; padding: 10px 12px; font-size: 15px; border: 1px solid var(--border); border-radius: 10px; margin: 12px 0 10px; background: #fff; }
+  label[for=quality] { display: block; font-size: 0.875rem; margin-top: 10px; }
+  select { width: 100%; padding: 10px 12px; font: inherit; font-size: 1rem; border: 1px solid var(--border); border-radius: 10px; margin: 6px 0 10px; background: #fff; min-height: 48px; }
+  .keep { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; font-size: 0.875rem; }
+  .keep[hidden] { display: none; }
+  .keep input { width: 1.125rem; height: 1.125rem; }
+  .source-note { color: var(--muted); font-size: 0.8125rem; margin-top: 6px; }
   .progress { display: none; margin-top: 14px; }
   .progress.show { display: block; }
   .bar { height: 10px; background: #eef0f5; border-radius: 99px; overflow: hidden; }
@@ -70,16 +78,20 @@
 <div class="wrap">
   <header>
     <h1>🎬 视频下载器</h1>
-    <p>粘贴 YouTube 或 TikTok 视频链接，解析后选择清晰度下载到本地</p>
+    <p>粘贴 YouTube、TikTok、抖音或微信视频号链接，解析后选择清晰度下载到本地</p>
   </header>
 
   <div class="card">
-    <div class="row">
-      <input type="text" id="url" placeholder="https://www.youtube.com/watch?v=...  或  https://www.tiktok.com/@user/video/..." autocomplete="off">
-      <button id="parseBtn">解析</button>
-    </div>
+    <form id="parseForm" action="/api/parse" method="post">
+      <label for="url">视频链接</label>
+      <div class="row">
+        <input type="text" id="url" name="url" required maxlength="2048" enterkeyhint="go" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" aria-describedby="urlHelp parseErr" placeholder="YouTube、TikTok、douyin.com、v.douyin.com 或 weixin.qq.com/sph/...">
+        <button type="submit" id="parseBtn">解析</button>
+      </div>
+      <p class="hint" id="urlHelp">支持 YouTube、TikTok、抖音（douyin.com/video 与 v.douyin.com 短链）和微信视频号分享链接（weixin.qq.com/sph/...）。</p>
+    </form>
     <div class="notice warn" id="envNotice"></div>
-    <div class="notice err" id="parseErr"></div>
+    <div class="notice err" id="parseErr" role="alert"></div>
   </div>
 
   <div class="card" id="resultCard" style="display:none">
@@ -90,33 +102,41 @@
         <div class="kv">上传者：<b id="uploader">-</b></div>
         <div class="kv">时长：<b id="duration">-</b></div>
         <div class="kv">来源：<b id="extractor">-</b> <span id="maxres"></span></div>
-        <select id="quality"></select>
-        <button id="dlBtn">下载</button>
+        <p class="source-note" id="sourceNote" hidden></p>
+        <label for="quality">清晰度</label>
+        <select id="quality" name="quality"></select>
+        <div class="keep" id="keepWrap" hidden>
+          <input type="checkbox" id="keepVideo" name="keep_video">
+          <label for="keepVideo">提取音频后仍保留 MP4</label>
+        </div>
+        <button type="button" id="dlBtn">下载</button>
       </div>
     </div>
     <div class="progress" id="progress">
       <div class="bar" id="bar"><div></div></div>
       <div class="pstat"><span id="pmsg">准备中…</span><span id="pdetail"></span></div>
     </div>
-    <div class="notice" id="dlNotice"></div>
+    <div class="notice" id="dlNotice" role="alert"></div>
   </div>
 
   <div class="card">
     <div class="files-head">
       <h3>📁 已下载的文件</h3>
-      <button class="ghost" id="refreshBtn">刷新</button>
+      <button type="button" class="ghost" id="refreshBtn">刷新</button>
     </div>
     <ul class="files" id="files"><li class="empty">加载中…</li></ul>
   </div>
 
   <footer>
-    仅供个人学习使用 · 请只下载你拥有版权或已获授权的内容 · 网站经常变化，请定期运行 <code>pip install -U yt-dlp</code>
+    仅供个人学习使用 · 请只下载你拥有版权或已获授权的内容（含 YouTube、TikTok、抖音和微信视频号），并遵守各网站服务条款及当地法律 · 网站经常变化，请定期运行 <code>pip install -U yt-dlp</code>
   </footer>
 </div>
 
 <script>
 const $ = (id) => document.getElementById(id);
 let currentUrl = "";
+let currentSource = "";
+let cookiesConfigured = true;
 let pollTimer = null;
 
 function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
@@ -156,26 +176,56 @@ async function loadStatus() {
   try {
     const s = await api("/api/status");
     const tips = [];
-    if (!s.ffmpeg) tips.push("未检测到 ffmpeg：将下载单文件格式（画质可能较低，无法转 MP3）。安装 ffmpeg 后重启程序即可获得最佳画质 MP4。");
+    cookiesConfigured = !!s.cookies;
+    if (!s.ffmpeg) tips.push("未检测到 ffmpeg：将下载单文件格式（画质可能较低，无法转 MP3，也无法从微信视频号提取音频）。安装 ffmpeg 后重启程序即可。");
+    if (!s.cookies) tips.push("未配置 cookies：抖音和 TikTok 经常返回 403。可将 Netscape 格式的 cookies.txt 放在项目目录，或设置环境变量 YTDLP_COOKIES_FROM_BROWSER=chrome（firefox / edge 亦可），然后重启。cookies 等同登录凭证，切勿分享。");
     if (tips.length) showNotice($("envNotice"), "warn", tips.join(" "));
   } catch {}
 }
 
+function syncKeep() {
+  const audio = $("quality").value === "mp3" || $("quality").value === "m4a";
+  $("keepWrap").hidden = !(currentSource === "weixin" && audio);
+}
+
 async function parse() {
-  const url = $("url").value.trim();
+  const input = $("url");
+  const url = input.value.trim();
   hideNotice($("parseErr"));
-  if (!isHttpUrl(url)) { showNotice($("parseErr"), "err", "请输入以 http:// 或 https:// 开头的有效视频链接"); return; }
+  if (!isHttpUrl(url)) {
+    input.setCustomValidity("请输入以 http:// 或 https:// 开头的有效视频链接");
+    input.setAttribute("aria-invalid", "true");
+    showNotice($("parseErr"), "err", "请输入以 http:// 或 https:// 开头的有效视频链接");
+    input.focus();
+    return;
+  }
+  input.setCustomValidity("");
+  input.removeAttribute("aria-invalid");
   const btn = $("parseBtn");
   btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>解析中';
   $("resultCard").style.display = "none";
   try {
     const d = await api("/api/parse", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
     currentUrl = url;
+    currentSource = d.source || "";
     $("title").textContent = d.title || "(无标题)";
     $("uploader").textContent = d.uploader || "-";
     $("duration").textContent = d.duration != null ? fmtDuration(d.duration) : (d.duration_string || "-");
-    $("extractor").textContent = d.extractor || "-";
-    $("maxres").textContent = d.max_resolution ? `· 最高 ${d.max_resolution}p` : "";
+    $("extractor").textContent = d.source_label || d.extractor || "-";
+    $("maxres").textContent = d.max_resolution
+      ? (d.source === "weixin" ? `· 分辨率 ${d.max_resolution}p` : `· 最高 ${d.max_resolution}p`)
+      : "";
+    const note = $("sourceNote");
+    if (d.source === "weixin") {
+      note.hidden = false;
+      note.textContent = "画质由第三方解析服务决定，目前只有一个 MP4。该服务若宕机，页面会直接说明。";
+    } else if (d.source === "douyin" && !cookiesConfigured) {
+      note.hidden = false;
+      note.textContent = "若随后提示 403 或需要 cookies，请按页面上方的说明配置 cookies.txt。";
+    } else {
+      note.hidden = true;
+      note.textContent = "";
+    }
     const th = $("thumb");
     if (d.thumbnail) { th.src = d.thumbnail; th.style.display = ""; } else { th.removeAttribute("src"); }
     const sel = $("quality"); sel.innerHTML = "";
@@ -184,6 +234,7 @@ async function parse() {
       o.value = q.id; o.textContent = q.label; o.disabled = !!q.disabled;
       sel.appendChild(o);
     }
+    syncKeep();
     $("info").classList.add("show");
     $("progress").classList.remove("show");
     hideNotice($("dlNotice"));
@@ -212,7 +263,7 @@ async function download() {
   $("progress").classList.add("show");
   setProgress(null, "正在启动…", "");
   try {
-    const { task_id } = await api("/api/download", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: currentUrl, quality }) });
+    const { task_id } = await api("/api/download", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: currentUrl, quality, keep_video: currentSource === "weixin" && $("keepVideo").checked }) });
     poll(task_id);
   } catch (e) {
     finishUI();
@@ -275,7 +326,7 @@ async function loadFiles() {
         <span class="fname" title="${esc(f.name)}">${esc(f.name)}</span>
         <span class="fmeta">${esc(f.size)} · ${esc(f.mtime)}</span>
         <a href="/files/${encodeURIComponent(f.name)}">下载</a>
-        <button class="del" data-name="${esc(f.name)}" title="从 downloads 文件夹删除">删除</button>
+        <button type="button" class="del" data-name="${esc(f.name)}" title="从 downloads 文件夹删除">删除</button>
       </li>`).join("");
   } catch (e) {
     ul.innerHTML = `<li class="empty">无法加载文件列表：${esc(e.error || "")}</li>`;
@@ -291,10 +342,17 @@ $("files").addEventListener("click", async (ev) => {
   loadFiles();
 });
 
-$("parseBtn").addEventListener("click", parse);
+$("parseForm").addEventListener("submit", (e) => { e.preventDefault(); parse(); });
 $("dlBtn").addEventListener("click", download);
 $("refreshBtn").addEventListener("click", loadFiles);
-$("url").addEventListener("keydown", e => { if (e.key === "Enter") parse(); });
+$("quality").addEventListener("change", syncKeep);
+$("url").addEventListener("input", () => {
+  $("url").setCustomValidity("");
+  if ($("url").getAttribute("aria-invalid") === "true") {
+    $("url").removeAttribute("aria-invalid");
+    hideNotice($("parseErr"));
+  }
+});
 $("thumb").addEventListener("error", e => { e.target.removeAttribute("src"); });
 
 loadStatus();

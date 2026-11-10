@@ -1,5 +1,6 @@
 @echo off
 REM Video Downloader - one-click start (Windows)
+REM YouTube / TikTok / Douyin / Weixin share links. Listens on 127.0.0.1 only.
 setlocal
 cd /d "%~dp0"
 
@@ -36,7 +37,7 @@ if errorlevel 1 (
 
 where ffmpeg >nul 2>nul
 if errorlevel 1 (
-  echo [NOTE] ffmpeg not found: single-file formats will be used (lower quality, no MP3^).
+  echo [NOTE] ffmpeg not found: single-file formats only ^(lower quality, no MP3, no Weixin audio^).
   echo        Install with: winget install Gyan.FFmpeg   then restart this script.
 )
 

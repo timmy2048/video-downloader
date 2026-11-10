@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-本地视频下载器 (YouTube / TikTok 等)
-后端: Flask + yt-dlp
-默认只监听 127.0.0.1:5000, 仅供本机使用。
+本地视频下载器 (YouTube / TikTok / 抖音 / 微信视频号)
+后端: Flask + yt-dlp；微信视频号走第三方解析服务（见 weixin_audio_extractor）
+默认只监听 127.0.0.1:5000, 仅供本机使用。不要改成 0.0.0.0。
 """
 import os
 import re
@@ -16,7 +16,16 @@ from urllib.parse import urlparse
 from flask import Flask, abort, jsonify, request, send_from_directory
 
 import yt_dlp
-from yt_dlp.utils import DownloadError, ExtractorError
+
+from sources import SOURCE_LABELS, WEIXIN_SHARE_HINT, canonical_douyin_url, detect_source
+from weixin_audio_extractor import (
+    WeixinAudioExtractorError,
+    download_media,
+    fetch_video_profile,
+    select_video_url,
+    summarize_profile,
+    user_message,
+)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DOWNLOAD_DIR = os.path.join(BASE_DIR, "downloads")
@@ -113,10 +122,23 @@ def friendly_error(e):
     hint = None
     if "not a bot" in low or "sign in to confirm" in low:
         hint = "YouTube 要求验证你不是机器人 (常见于服务器/机房 IP 或频繁请求)。可稍后重试、更换网络, 或在项目目录放置 cookies.txt。"
+    elif "fresh cookies" in low:
+        hint = (
+            "抖音需要新鲜的 cookies 才能继续 (即使不登录也可能返回 403)。"
+            "请把浏览器导出的 Netscape 格式 cookies.txt 放到项目目录 (与 app.py 同级), "
+            "或设置环境变量 YTDLP_COOKIES_FROM_BROWSER=chrome (也可以是 firefox、edge), 然后重启。"
+            "cookies 等同登录凭证, 切勿分享。"
+        )
+    elif "douyin" in low and ("403" in low or "forbidden" in low or "cookie" in low):
+        hint = (
+            "抖音拒绝了请求 (403)。当前网络可能被限制, 或缺少 cookies。"
+            "可更换网络, 并把 cookies.txt 放到项目目录, 或设置 YTDLP_COOKIES_FROM_BROWSER。"
+            "同时请保持 yt-dlp 为最新版: pip install -U yt-dlp"
+        )
     elif "universal data for rehydration" in low or ("tiktok" in low and ("403" in low or "forbidden" in low)):
         hint = "TikTok 拒绝了请求 (当前网络/IP 可能被 TikTok 限制或所在地区不可用, 也可能视频已删除)。可更换网络后重试, 并确保 yt-dlp 为最新版: pip install -U yt-dlp"
     elif "unsupported url" in low:
-        hint = "不支持该链接, 请确认是有效的 YouTube / TikTok 视频地址。"
+        hint = "不支持该链接。请确认是有效的 YouTube、TikTok、抖音 (douyin.com/video 或 v.douyin.com) 或微信视频号 (weixin.qq.com/sph/) 地址。"
     elif "private" in low:
         hint = "该视频为私密视频, 无法下载。"
     elif "age" in low and ("restricted" in low or "confirm your age" in low):
@@ -124,7 +146,7 @@ def friendly_error(e):
     elif "not available" in low or "unavailable" in low:
         hint = "视频不可用 (可能已删除、地区限制或需要登录)。"
     elif "ip address is blocked" in low or "blocked" in low or "403" in low:
-        hint = "请求被网站拒绝 (IP 可能被限制)。可更换网络或稍后再试, 并确保 yt-dlp 为最新版: pip install -U yt-dlp"
+        hint = "请求被网站拒绝 (IP 或 cookies 可能被限制)。抖音和 TikTok 尤其常见。可更换网络、配置 cookies.txt, 或稍后再试, 并确保 yt-dlp 为最新版: pip install -U yt-dlp"
     elif "timed out" in low or "timeout" in low or "connection" in low or "resolve" in low:
         hint = "网络连接失败或超时, 请检查网络 (部分网站在某些地区需要代理)。"
     elif "requested format is not available" in low:
@@ -200,6 +222,32 @@ def format_opts(quality):
 
 
 QUALITY_TAGS = {"best": " [best]", "1080": " [1080p]", "720": " [720p]", "480": " [480p]", "mp3": "", "m4a": ""}
+YTDLP_QUALITIES = ("best", "1080", "720", "480", "mp3", "m4a")
+WEIXIN_QUALITIES = ("best", "mp3", "m4a")
+
+
+def build_weixin_quality_options(ff=None):
+    """视频号只有解析服务返回的单个 MP4, 清晰度分档用不上; 音频沿用 MP3/M4A。"""
+    if ff is None:
+        ff = has_ffmpeg()
+    return [
+        {"id": "best", "label": "视频 MP4 (保留原片)"},
+        {"id": "mp3", "label": "仅音频 MP3" + ("" if ff else " (需 ffmpeg)"), "disabled": not ff},
+        {"id": "m4a", "label": "仅音频 M4A" + ("" if ff else " (需 ffmpeg)"), "disabled": not ff},
+    ]
+
+
+def source_label(source, extractor=None):
+    if source == "generic":
+        return extractor or SOURCE_LABELS["generic"]
+    return SOURCE_LABELS.get(source) or extractor or SOURCE_LABELS["generic"]
+
+
+def prepare_media_url(url):
+    """抖音页面链接改写成官方提取器的 /video/<id>; 短链保持不动。"""
+    if detect_source(url) == "douyin":
+        return canonical_douyin_url(url)
+    return url
 
 
 def human_size(n):
@@ -233,7 +281,68 @@ def update_task(task_id, **kw):
             t["updated"] = time.time()
 
 
-def run_download(task_id, url, quality):
+def run_weixin_download(task_id, url, quality, keep_video):
+    def on_stage(stage):
+        messages = {
+            "parsing": "正在请求微信视频号解析服务…",
+            "downloading": "正在下载…",
+            "extracting": "正在提取音频…",
+        }
+        status = "processing" if stage == "extracting" else "starting"
+        if stage == "downloading":
+            status = "downloading"
+        update_task(task_id, status=status, message=messages.get(stage, "正在处理…"))
+
+    def on_progress(done, total):
+        pct = (done / total * 100) if total else None
+        update_task(
+            task_id,
+            status="downloading",
+            percent=round(pct, 1) if pct is not None else None,
+            downloaded=human_size(done),
+            total=human_size(total) if total else "",
+            speed="",
+            eta=None,
+            part=1,
+            message="正在下载…",
+        )
+
+    try:
+        result = download_media(
+            url,
+            DOWNLOAD_DIR,
+            quality=quality,
+            keep_video=keep_video or quality == "best",
+            on_progress=on_progress,
+            on_stage=on_stage,
+        )
+        filepath = str(result.media_path)
+        if not os.path.isfile(filepath):
+            raise RuntimeError("下载完成但未找到输出文件")
+        update_task(
+            task_id,
+            status="finished",
+            percent=100,
+            message="完成",
+            filename=os.path.basename(filepath),
+            size=human_size(os.path.getsize(filepath)),
+            title=result.title,
+        )
+    except ValueError as e:
+        update_task(task_id, status="error", error=str(e), detail="", message="失败")
+    except WeixinAudioExtractorError as e:
+        app.logger.warning("weixin download failed: %s", e)
+        update_task(task_id, status="error", error=user_message(e), detail=str(e), message="失败")
+    except Exception as e:  # noqa: BLE001
+        fe = friendly_error(e)
+        app.logger.warning("weixin download failed: %s", fe["detail"])
+        update_task(task_id, status="error", error=fe["error"], detail=fe["detail"], message="失败")
+
+
+def run_download(task_id, url, quality, keep_video=False):
+    if detect_source(url) == "weixin":
+        run_weixin_download(task_id, url, quality, keep_video)
+        return
     seen_files = []
 
     def progress_hook(d):
@@ -329,12 +438,49 @@ def api_status():
     })
 
 
+def parse_weixin(url):
+    # yt-dlp 能处理抖音 (DouyinIE, 短链由 generic 跟着重定向), 但没有微信视频号提取器。
+    # 视频号继续用 weixin_audio_extractor 里的第三方解析服务。
+    try:
+        profile = fetch_video_profile(url)
+        select_video_url(profile)
+        summary = summarize_profile(profile)
+    except WeixinAudioExtractorError as e:
+        app.logger.warning("weixin parse failed: %s", e)
+        return jsonify({"error": user_message(e), "detail": str(e)}), 502
+    width, height = summary.get("width"), summary.get("height")
+    if width and height:
+        max_side = min(width, height)
+    else:
+        max_side = width or height
+    return jsonify({
+        "title": summary.get("title") or "微信视频号视频",
+        "thumbnail": summary.get("thumbnail"),
+        "duration": summary.get("duration"),
+        "duration_string": None,
+        "uploader": summary.get("uploader"),
+        "extractor": "Weixin",
+        "webpage_url": url,
+        "max_resolution": max_side,
+        "qualities": build_weixin_quality_options(),
+        "ffmpeg": has_ffmpeg(),
+        "source": "weixin",
+        "source_label": source_label("weixin"),
+    })
+
+
 @app.route("/api/parse", methods=["POST"])
 def api_parse():
     data = request.get_json(silent=True) or {}
     url, err = validate_url(data.get("url"))
     if err:
         return jsonify({"error": err}), 400
+    source = detect_source(url)
+    if source == "weixin_other":
+        return jsonify({"error": WEIXIN_SHARE_HINT}), 400
+    if source == "weixin":
+        return parse_weixin(url)
+    url = prepare_media_url(url)
     try:
         opts = base_opts()
         opts["skip_download"] = True
@@ -346,17 +492,20 @@ def api_parse():
                 return jsonify({"error": "这是一个播放列表/合集链接, 请粘贴单个视频的链接。"}), 400
             info = entries[0]
         qualities, max_side = build_quality_options(info)
+        extractor = info.get("extractor_key") or info.get("extractor")
         return jsonify({
             "title": info.get("title"),
             "thumbnail": info.get("thumbnail"),
             "duration": info.get("duration"),
             "duration_string": info.get("duration_string"),
             "uploader": info.get("uploader") or info.get("channel") or info.get("creator"),
-            "extractor": info.get("extractor_key") or info.get("extractor"),
+            "extractor": extractor,
             "webpage_url": info.get("webpage_url") or url,
             "max_resolution": max_side,
             "qualities": qualities,
             "ffmpeg": has_ffmpeg(),
+            "source": source,
+            "source_label": source_label(source, extractor),
         })
     except Exception as e:  # noqa: BLE001
         fe = friendly_error(e)
@@ -370,18 +519,34 @@ def api_download():
     url, err = validate_url(data.get("url"))
     if err:
         return jsonify({"error": err}), 400
+    source = detect_source(url)
+    if source == "weixin_other":
+        return jsonify({"error": WEIXIN_SHARE_HINT}), 400
     quality = str(data.get("quality") or "best")
-    if quality not in ("best", "1080", "720", "480", "mp3", "m4a"):
+    allowed = WEIXIN_QUALITIES if source == "weixin" else YTDLP_QUALITIES
+    if quality not in allowed:
+        if source == "weixin" and quality in YTDLP_QUALITIES:
+            return jsonify({
+                "error": "微信视频号由第三方解析服务提供单个 MP4, 没有 1080p/720p/480p 分档。请选择视频 MP4 或音频。",
+            }), 400
         return jsonify({"error": "未知的清晰度选项"}), 400
     if quality == "mp3" and not has_ffmpeg():
+        if source == "weixin":
+            return jsonify({"error": "转换 MP3 需要 ffmpeg, 请安装 ffmpeg 或选择视频 MP4。"}), 400
         return jsonify({"error": "转换 MP3 需要 ffmpeg, 请安装 ffmpeg 或选择 M4A。"}), 400
+    if source == "weixin" and quality == "m4a" and not has_ffmpeg():
+        return jsonify({"error": "转换 M4A 需要 ffmpeg, 请安装 ffmpeg 或选择视频 MP4。"}), 400
+    url = prepare_media_url(url)
+    keep_video = data.get("keep_video") is True
     task_id = uuid.uuid4().hex
     with TASKS_LOCK:
         TASKS[task_id] = {
             "id": task_id, "status": "queued", "percent": 0, "message": "排队中…",
             "url": url, "quality": quality, "created": time.time(), "updated": time.time(),
         }
-    threading.Thread(target=run_download, args=(task_id, url, quality), daemon=True).start()
+    threading.Thread(
+        target=run_download, args=(task_id, url, quality, keep_video), daemon=True,
+    ).start()
     return jsonify({"task_id": task_id})
 
 
@@ -436,7 +601,8 @@ def delete_file(name):
 if __name__ == "__main__":
     print("=" * 56)
     print(f"  视频下载器已启动: http://{HOST}:{PORT}")
-    print(f"  yt-dlp {yt_dlp.version.__version__} | ffmpeg: {'已安装' if has_ffmpeg() else '未安装 (将使用单文件格式)'}")
+    print("  支持: YouTube / TikTok / 抖音 / 微信视频号")
+    print(f"  yt-dlp {yt_dlp.version.__version__} | ffmpeg: {'已安装' if has_ffmpeg() else '未安装 (将使用单文件格式, 无法提取音频)'}")
     print(f"  JS 运行时: {', '.join(JS_RUNTIMES) or '未检测到 (YouTube 部分格式可能不可用)'}")
     print(f"  文件保存在: {DOWNLOAD_DIR}")
     print("  按 Ctrl+C 停止")
